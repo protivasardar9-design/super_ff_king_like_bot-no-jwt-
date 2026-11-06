@@ -96,46 +96,49 @@ async def send_multiple_requests(uid, region, url, limit_count):
         protobuf_message = create_protobuf_message(uid, region)
         if protobuf_message is None:
             return None
-
         encrypted_uid = encrypt_message(protobuf_message)
         if encrypted_uid is None:
             return None
-
         tokens = load_tokens(region)
-        if not tokens:
+        if tokens is None:
             return None
-
-        # Use the first token to read the starting Like count.
-        before = make_request(encrypted_uid, region, tokens[0]['token'])
+        
+        token = tokens[0]['token']
+        # initial check to see current likes before sending
+        before = make_request(encrypted_uid, region, token)
         if before is None:
             return None
         before_like = before.AccountInfo.Likes
 
         success_likes = 0
+        token_index = 0
         results = []
 
-        # Try tokens one by one; move on immediately if a token adds no Likes.
-        for token_data in tokens:
-            if success_likes >= limit_count:
+        # 🔄 টার্গেট লাইক পূরণ না হওয়া পর্যন্ত পরের ভালো টোকেন নিবে
+        while success_likes < limit_count and token_index < len(tokens):
+            batch_size = limit_count - success_likes
+            tasks = []
+            
+            for _ in range(batch_size):
+                if token_index >= len(tokens):
+                    break
+                t_key = tokens[token_index]["token"]
+                tasks.append(send_request(encrypted_uid, t_key, url))
+                token_index += 1
+                
+            if not tasks:
                 break
-
-            result = await send_request(
-                encrypted_uid,
-                token_data['token'],
-                url
-            )
-            results.append(result)
-
-            # Give the game server a moment to update the Like count.
-            await asyncio.sleep(1)
-            after = make_request(encrypted_uid, region, tokens[0]['token'])
-
-            if after is not None:
-                success_likes = max(
-                    after.AccountInfo.Likes - before_like,
-                    0
-                )
-
+                
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            results.extend(batch_results)
+            
+            await asyncio.sleep(1) 
+            after_batch = make_request(encrypted_uid, region, tokens[0]['token'])
+            if after_batch:
+                success_likes = after_batch.AccountInfo.Likes - before_like
+            else:
+                break
+                
         return results
     except Exception as e:
         app.logger.error(f"Exception in send_multiple_requests: {e}")
