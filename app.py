@@ -14,18 +14,13 @@ from collections import OrderedDict
 
 app = Flask(__name__)
 
-
-@app.route("/", methods=["GET"])
-def home():
-    return jsonify({"status": "ok", "service": "LIKE API", "endpoints": ["/like", "/remain"]})
-    
 # ✅ Valid API keys
 VALID_API_KEYS = {
     "Super"  # don't change warna api or bot dono nhi chalega 
 }
 
 # 🔢 Like limit tracking
-daily_limit = 2000
+daily_limit = 200
 used_count = 0
 
 
@@ -91,51 +86,23 @@ async def send_request(encrypted_uid, token, url):
         app.logger.error(f"Exception in send_request: {e}")
         return None
 
-async def send_multiple_requests(uid, region, url, limit_count):
+
+async def send_multiple_requests(uid, region, url):
     try:
         protobuf_message = create_protobuf_message(uid, region)
         if protobuf_message is None:
             return None
-
         encrypted_uid = encrypt_message(protobuf_message)
         if encrypted_uid is None:
             return None
-
         tokens = load_tokens(region)
-        if not tokens:
+        if tokens is None:
             return None
-
-        # Use the first token to read the starting Like count.
-        before = make_request(encrypted_uid, region, tokens[0]['token'])
-        if before is None:
-            return None
-        before_like = before.AccountInfo.Likes
-
-        success_likes = 0
-        results = []
-
-        # Try tokens one by one; move on immediately if a token adds no Likes.
-        for token_data in tokens:
-            if success_likes >= limit_count:
-                break
-
-            result = await send_request(
-                encrypted_uid,
-                token_data['token'],
-                url
-            )
-            results.append(result)
-
-            # Give the game server a moment to update the Like count.
-            await asyncio.sleep(1)
-            after = make_request(encrypted_uid, region, tokens[0]['token'])
-
-            if after is not None:
-                success_likes = max(
-                    after.AccountInfo.Likes - before_like,
-                    0
-                )
-
+        tasks = []
+        for i in range(100):
+            token = tokens[i % len(tokens)]["token"]
+            tasks.append(send_request(encrypted_uid, token, url))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         return results
     except Exception as e:
         app.logger.error(f"Exception in send_multiple_requests: {e}")
@@ -212,8 +179,6 @@ def handle_requests():
 
     uid = request.args.get("uid")
     region = request.args.get("region", "").upper()
-    limit_count = request.args.get("limit", default=20, type=int)
-    
     if not uid or not region:
         return {"error": "UID and region are required"}, 400
 
@@ -240,7 +205,7 @@ def handle_requests():
             else:
                 url = "https://clientbp.ggpolarbear.com/LikeProfile"
 
-            asyncio.run(send_multiple_requests(uid, region, url, limit_count))
+            asyncio.run(send_multiple_requests(uid, region, url))
 
             after = make_request(encrypted_uid, region, token)
             if after is None:
