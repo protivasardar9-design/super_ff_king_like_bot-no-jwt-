@@ -14,6 +14,9 @@ from collections import OrderedDict
 
 app = Flask(__name__)
 
+# API URL copied from main.py
+API_BASE = "https://charlie-revenue-joshua-alone.trycloudflare.com"
+
 
 @app.route("/", methods=["GET"])
 def home():
