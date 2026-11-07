@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 # ✅ Valid API keys
 VALID_API_KEYS = {
-    "XMAX"  # don't change warna api nhi chalega
+    "Super"  # don't change warna api nhi chalega
 }
 
 # 🔢 Like limit tracking
