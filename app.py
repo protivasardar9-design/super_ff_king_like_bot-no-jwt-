@@ -14,18 +14,13 @@ from collections import OrderedDict
 
 app = Flask(__name__)
 
-
-@app.route("/", methods=["GET"])
-def home():
-    return jsonify({"status": "ok", "service": "LIKE API", "endpoints": ["/like", "/remain"]})
-    
 # ✅ Valid API keys
 VALID_API_KEYS = {
-    "Super"  # don't change warna api or bot dono nhi chalega 
+    "Super"  # don't change warna api nhi chalega
 }
 
 # 🔢 Like limit tracking
-daily_limit = 2000
+daily_limit = 200
 used_count = 0
 
 
@@ -74,14 +69,14 @@ async def send_request(encrypted_uid, token, url):
     try:
         edata = bytes.fromhex(encrypted_uid)
         headers = {
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)",
+            "User-Agent": "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
             "Connection": "Keep-Alive",
-            "Accept-Encoding": "gzip",
+            "Accept-Encoding": "deflate, gzip",
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/x-www-form-urlencoded",
-            "Expect": "100-continue",
-            "X-Unity-Version": "2018.4.11f1",
+            "X-Unity-Version": "2018.4.12f1",
             "X-GA": "v1 1",
+            "X-GA-SV": "1789580233",
             "ReleaseVersion": "OB55"
         }
         async with aiohttp.ClientSession() as session:
@@ -91,7 +86,8 @@ async def send_request(encrypted_uid, token, url):
         app.logger.error(f"Exception in send_request: {e}")
         return None
 
-async def send_multiple_requests(uid, region, url, limit_count):
+
+async def send_multiple_requests(uid, region, url):
     try:
         protobuf_message = create_protobuf_message(uid, region)
         if protobuf_message is None:
@@ -102,44 +98,366 @@ async def send_multiple_requests(uid, region, url, limit_count):
         tokens = load_tokens(region)
         if tokens is None:
             return None
-        
-        token = tokens[0]['token']
-        # initial check to see current likes before sending
-        before = make_request(encrypted_uid, region, token)
-        if before is None:
-            return None
-        before_like = before.AccountInfo.Likes
-
-        success_likes = 0
-        token_index = 0
-        results = []
-
-        # 🔄 টার্গেট লাইক পূরণ না হওয়া পর্যন্ত পরের ভালো টোকেন নিবে
-        while success_likes < limit_count and token_index < len(tokens):
-            batch_size = limit_count - success_likes
-            tasks = []
-            
-            for _ in range(batch_size):
-                if token_index >= len(tokens):
-                    break
-                t_key = tokens[token_index]["token"]
-                tasks.append(send_request(encrypted_uid, t_key, url))
-                token_index += 1
-                
-            if not tasks:
-                break
-                
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-            results.extend(batch_results)
-            
-            await asyncio.sleep(1) 
-            after_batch = make_request(encrypted_uid, region, tokens[0]['token'])
-            if after_batch:
-                success_likes = after_batch.AccountInfo.Likes - before_like
-            else:
-                break
-                
+        tasks = []
+        for i in range(300):
+            token = tokens[i % len(tokens)]["token"]
+            tasks.append(send_request(encrypted_uid, token, url))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         return results
+    except Exception as e:
+        app.logger.error(f"Exception in send_multiple_requests: {e}")
+        return None
+
+
+def run_async_tasks(uid, region, url):
+    """Vercel safe event loop runner"""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(send_multiple_requests(uid, region, url))
+        loop.close()
+        return result
+    except Exception as e:
+        app.logger.error(f"Error in run_async_tasks: {e}")
+        return None
+
+
+def create_protobuf(uid):
+    try:
+        message = uid_generator_pb2.uid_generator()
+        message.saturn_ = int(uid)
+        message.garena = 1
+        return message.SerializeToString()
+    except Exception as e:
+        app.logger.error(f"Error creating uid protobuf: {e}")
+        return None
+
+
+def enc(uid):
+    protobuf_data = create_protobuf(uid)
+    if protobuf_data is None:
+        return None
+    return encrypt_message(protobuf_data)
+
+
+def make_request(encrypt, region, token):
+    try:
+        if region == "IND":
+            url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
+        elif region in {"BR", "US", "SAC", "NA"}:
+            url = "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
+        else:
+            url = "https://clientbp.ggpolarbear.com/GetPlayerPersonalShow"
+            
+        edata = bytes.fromhex(encrypt)
+        headers = {
+            "User-Agent": "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
+            "Connection": "Keep-Alive",
+            "Accept-Encoding": "deflate, gzip",
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Unity-Version": "2018.4.12f1",
+            "X-GA": "v1 1",
+            "X-GA-SV": "1789580231",
+            "ReleaseVersion": "OB55"
+        }
+        
+        response = requests.post(url, data=edata, headers=headers, verify=False)
+        
+        if response.status_code != 200:
+            app.logger.error(f"Server error status: {response.status_code}")
+            return None
+
+        binary = response.content
+        decoded = visit_count_pb2.Info()
+        decoded.ParseFromString(binary)
+        return decoded
+        
+    except DecodeError as e:
+        app.logger.error(f"DecodeError: {e}")
+        return None
+    except Exception as e:
+        app.logger.error(f"Error in make_request: {e}")
+        return None
+
+
+@app.route('/like', methods=['GET'])
+def handle_requests():
+    global used_count
+
+    # ✅ API key check
+    api_key = request.args.get("key")
+    if api_key not in VALID_API_KEYS:
+        result = OrderedDict([
+            ("error", "Invalid or missing API key"),
+            ("status", 3)
+        ])
+        return app.response_class(
+            response=json.dumps(result, separators=(',', ':')),
+            status=401,
+            mimetype='application/json'
+        )
+
+    uid = request.args.get("uid")
+    region = request.args.get("region", "").upper()
+    if not uid or not region:
+        return {"error": "UID and region are required"}, 400
+
+    try:
+        def process_request():
+            global used_count
+
+            tokens = load_tokens(region)
+            if not tokens:
+                raise Exception("Failed to load tokens.")
+            token = tokens[0]['token']
+            encrypted_uid = enc(uid)
+            if encrypted_uid is None:
+                raise Exception("Encryption of UID failed.")
+                
+            before = make_request(encrypted_uid, region, token)
+            if before is None:
+                raise Exception("Failed to get initial info.")
+            before_like = before.AccountInfo.Likes
+
+            if region == "IND":
+                url = "https://client.ind.freefiremobile.com/LikeProfile"
+            elif region in {"BR", "US", "SAC", "NA"}:
+                url = "https://client.us.freefiremobile.com/LikeProfile"
+            else:
+                url = "https://clientbp.ggpolarbear.com/LikeProfile"
+
+            # ✅ Replaced asyncio.run with Vercel safe runner
+            run_async_tasks(uid, region, url)
+
+            after = make_request(encrypted_uid, region, token)
+            if after is None:
+                raise Exception("Failed to get final info.")
+            after_like = after.AccountInfo.Likes
+            like_given = after_like - before_like
+            status = 1 if like_given > 0 else 2
+
+            if status == 1:
+                used_count += 1
+
+            remaining = max(daily_limit - used_count, 0)
+
+            result = OrderedDict([
+                ("LikesGivenByAPI", like_given),
+                ("LikesafterCommand", after_like),
+                ("LikesbeforeCommand", before_like),
+                ("PlayerNickname", after.AccountInfo.PlayerNickname),
+                ("Level", after.AccountInfo.Levels),
+                ("Region", after.AccountInfo.PlayerRegion),
+                ("UID", after.AccountInfo.UID),
+                ("status", status),
+                ("daily_limit", daily_limit),
+                ("used", used_count),
+                ("remaining", remaining)
+            ])
+
+            return app.response_class(
+                response=json.dumps(result, separators=(',', ':')),
+                status=200,
+                mimetype='application/json'
+            )
+
+        return process_request()
+
+    except Exception as e:
+        app.logger.error(f"Error: {e}")
+        return {"error": str(e)}, 500
+
+
+@app.route('/remain', methods=['GET'])
+def remain_info():
+    global used_count
+
+    remaining = max(daily_limit - used_count, 0)
+    data = {
+        "daily_limit": daily_limit,
+        "remaining": remaining,
+        "used": used_count,
+        "reset_info": "4:00 AM IST"
+    }
+    return jsonify(data)
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000)
+    except Exception as e:
+        app.logger.error(f"Exception in send_multiple_requests: {e}")
+        return None
+
+
+def create_protobuf(uid):
+    try:
+        message = uid_generator_pb2.uid_generator()
+        message.saturn_ = int(uid)
+        message.garena = 1
+        return message.SerializeToString()
+    except Exception as e:
+        app.logger.error(f"Error creating uid protobuf: {e}")
+        return None
+
+
+def enc(uid):
+    protobuf_data = create_protobuf(uid)
+    if protobuf_data is None:
+        return None
+    return encrypt_message(protobuf_data)
+
+
+def make_request(encrypt, region, token):
+    try:
+        if region == "IND":
+            url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
+        elif region in {"BR", "US", "SAC", "NA"}:
+            url = "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
+        else:
+            url = "https://clientbp.ggpolarbear.com/GetPlayerPersonalShow"
+            
+        edata = bytes.fromhex(encrypt)
+        headers = {
+            "User-Agent": "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
+            "Connection": "Keep-Alive",
+            "Accept-Encoding": "deflate, gzip",
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Unity-Version": "2018.4.12f1",
+            "X-GA": "v1 1",
+            "X-GA-SV": "1789580231",
+            "ReleaseVersion": "OB55"
+        }
+        
+        response = requests.post(url, data=edata, headers=headers, verify=False)
+        
+        # 🔍 Terminal Debugging Logs
+        print(f"--- DEBUG make_request ---")
+        print(f"Status Code: {response.status_code}")
+        print(f"Response Content (Hex): {response.content.hex()[:100]}")
+        
+        if response.status_code != 200:
+            return None
+
+        binary = response.content
+        decoded = visit_count_pb2.Info()
+        decoded.ParseFromString(binary)
+        return decoded
+        
+    except DecodeError as e:
+        print(f"DecodeError: {e}")
+        app.logger.error(f"DecodeError: {e}")
+        return None
+    except Exception as e:
+        print(f"Error in make_request: {e}")
+        app.logger.error(f"Error in make_request: {e}")
+        return None
+
+
+@app.route('/like', methods=['GET'])
+def handle_requests():
+    global used_count
+
+    # ✅ API key check
+    api_key = request.args.get("key")
+    if api_key not in VALID_API_KEYS:
+        result = OrderedDict([
+            ("error", "Invalid or missing API key"),
+            ("status", 3)
+        ])
+        return app.response_class(
+            response=json.dumps(result, separators=(',', ':')),
+            status=401,
+            mimetype='application/json'
+        )
+
+    uid = request.args.get("uid")
+    region = request.args.get("region", "").upper()
+    if not uid or not region:
+        return {"error": "UID and region are required"}, 400
+
+    try:
+        def process_request():
+            global used_count
+
+            tokens = load_tokens(region)
+            if not tokens:
+                raise Exception("Failed to load tokens.")
+            token = tokens[0]['token']
+            encrypted_uid = enc(uid)
+            if encrypted_uid is None:
+                raise Exception("Encryption of UID failed.")
+                
+            before = make_request(encrypted_uid, region, token)
+            if before is None:
+                raise Exception("Failed to get initial info.")
+            before_like = before.AccountInfo.Likes
+
+            if region == "IND":
+                url = "https://client.ind.freefiremobile.com/LikeProfile"
+            elif region in {"BR", "US", "SAC", "NA"}:
+                url = "https://client.us.freefiremobile.com/LikeProfile"
+            else:
+                url = "https://clientbp.ggpolarbear.com/LikeProfile"
+
+            asyncio.run(send_multiple_requests(uid, region, url))
+
+            after = make_request(encrypted_uid, region, token)
+            if after is None:
+                raise Exception("Failed to get final info.")
+            after_like = after.AccountInfo.Likes
+            like_given = after_like - before_like
+            status = 1 if like_given > 0 else 2
+
+            if status == 1:
+                used_count += 1
+
+            remaining = max(daily_limit - used_count, 0)
+
+            result = OrderedDict([
+                ("LikesGivenByAPI", like_given),
+                ("LikesafterCommand", after_like),
+                ("LikesbeforeCommand", before_like),
+                ("PlayerNickname", after.AccountInfo.PlayerNickname),
+                ("Level", after.AccountInfo.Levels),
+                ("Region", after.AccountInfo.PlayerRegion),
+                ("UID", after.AccountInfo.UID),
+                ("status", status),
+                ("daily_limit", daily_limit),
+                ("used", used_count),
+                ("remaining", remaining)
+            ])
+
+            return app.response_class(
+                response=json.dumps(result, separators=(',', ':')),
+                status=200,
+                mimetype='application/json'
+            )
+
+        return process_request()
+
+    except Exception as e:
+        app.logger.error(f"Error: {e}")
+        return {"error": str(e)}, 500
+
+
+@app.route('/remain', methods=['GET'])
+def remain_info():
+    global used_count
+
+    remaining = max(daily_limit - used_count, 0)
+    data = {
+        "daily_limit": daily_limit,
+        "remaining": remaining,
+        "used": used_count,
+        "reset_info": "4:00 AM IST"
+    }
+    return jsonify(data)
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000)
     except Exception as e:
         app.logger.error(f"Exception in send_multiple_requests: {e}")
         return None
@@ -173,14 +491,14 @@ def make_request(encrypt, region, token):
             url = "https://clientbp.ggpolarbear.com/GetPlayerPersonalShow"
         edata = bytes.fromhex(encrypt)
         headers = {
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)",
+            "User-Agent": "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
             "Connection": "Keep-Alive",
-            "Accept-Encoding": "gzip",
+            "Accept-Encoding": "deflate, gzip",
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/x-www-form-urlencoded",
-            "Expect": "100-continue",
-            "X-Unity-Version": "2018.4.11f1",
+            "X-Unity-Version": "2018.4.12f1",
             "X-GA": "v1 1",
+            "X-GA-SV": "1789580231",
             "ReleaseVersion": "OB55"
         }
         response = requests.post(url, data=edata, headers=headers, verify=False)
@@ -198,7 +516,7 @@ def make_request(encrypt, region, token):
 
 @app.route('/like', methods=['GET'])
 def handle_requests():
-    global used_count  # ✅ fix added
+    global used_count
 
     # ✅ API key check
     api_key = request.args.get("key")
@@ -215,14 +533,12 @@ def handle_requests():
 
     uid = request.args.get("uid")
     region = request.args.get("region", "").upper()
-    limit_count = request.args.get("limit", default=100, type=int)
-    
     if not uid or not region:
         return {"error": "UID and region are required"}, 400
 
     try:
         def process_request():
-            global used_count  # ✅ fix added again (for nested function)
+            global used_count
 
             tokens = load_tokens(region)
             if not tokens:
@@ -243,7 +559,7 @@ def handle_requests():
             else:
                 url = "https://clientbp.ggpolarbear.com/LikeProfile"
 
-            asyncio.run(send_multiple_requests(uid, region, url, limit_count))
+            asyncio.run(send_multiple_requests(uid, region, url))
 
             after = make_request(encrypted_uid, region, token)
             if after is None:
@@ -252,7 +568,6 @@ def handle_requests():
             like_given = after_like - before_like
             status = 1 if like_given > 0 else 2
 
-            # ✅ Count only when successful (status == 1)
             if status == 1:
                 used_count += 1
 
@@ -285,10 +600,9 @@ def handle_requests():
         return {"error": str(e)}, 500
 
 
-# 🆕 /remain endpoint
 @app.route('/remain', methods=['GET'])
 def remain_info():
-    global used_count  # ✅ fix added
+    global used_count
 
     remaining = max(daily_limit - used_count, 0)
     data = {
@@ -300,5 +614,5 @@ def remain_info():
     return jsonify(data)
 
 
-if __name__ == '__main__':
-    app.run(debug=True, use_reloader=False)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000)
