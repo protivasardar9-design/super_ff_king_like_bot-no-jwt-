@@ -14,13 +14,18 @@ from collections import OrderedDict
 
 app = Flask(__name__)
 
+
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"status": "ok", "service": "LIKE API", "endpoints": ["/like", "/remain"]})
+    
 # ✅ Valid API keys
 VALID_API_KEYS = {
     "Super"  # don't change warna api or bot dono nhi chalega 
 }
 
 # 🔢 Like limit tracking
-daily_limit = 200
+daily_limit = 2000
 used_count = 0
 
 
@@ -86,8 +91,7 @@ async def send_request(encrypted_uid, token, url):
         app.logger.error(f"Exception in send_request: {e}")
         return None
 
-
-async def send_multiple_requests(uid, region, url):
+async def send_multiple_requests(uid, region, url, limit_count):
     try:
         protobuf_message = create_protobuf_message(uid, region)
         if protobuf_message is None:
@@ -98,11 +102,43 @@ async def send_multiple_requests(uid, region, url):
         tokens = load_tokens(region)
         if tokens is None:
             return None
-        tasks = []
-        for i in range(100):
-            token = tokens[i % len(tokens)]["token"]
-            tasks.append(send_request(encrypted_uid, token, url))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        token = tokens[0]['token']
+        # initial check to see current likes before sending
+        before = make_request(encrypted_uid, region, token)
+        if before is None:
+            return None
+        before_like = before.AccountInfo.Likes
+
+        success_likes = 0
+        token_index = 0
+        results = []
+
+        # 🔄 টার্গেট লাইক পূরণ না হওয়া পর্যন্ত পরের ভালো টোকেন নিবে
+        while success_likes < limit_count and token_index < len(tokens):
+            batch_size = limit_count - success_likes
+            tasks = []
+            
+            for _ in range(batch_size):
+                if token_index >= len(tokens):
+                    break
+                t_key = tokens[token_index]["token"]
+                tasks.append(send_request(encrypted_uid, t_key, url))
+                token_index += 1
+                
+            if not tasks:
+                break
+                
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            results.extend(batch_results)
+            
+            await asyncio.sleep(1) 
+            after_batch = make_request(encrypted_uid, region, tokens[0]['token'])
+            if after_batch:
+                success_likes = after_batch.AccountInfo.Likes - before_like
+            else:
+                break
+                
         return results
     except Exception as e:
         app.logger.error(f"Exception in send_multiple_requests: {e}")
@@ -179,6 +215,8 @@ def handle_requests():
 
     uid = request.args.get("uid")
     region = request.args.get("region", "").upper()
+    limit_count = request.args.get("limit", default=100, type=int)
+    
     if not uid or not region:
         return {"error": "UID and region are required"}, 400
 
@@ -205,7 +243,7 @@ def handle_requests():
             else:
                 url = "https://clientbp.ggpolarbear.com/LikeProfile"
 
-            asyncio.run(send_multiple_requests(uid, region, url))
+            asyncio.run(send_multiple_requests(uid, region, url, limit_count))
 
             after = make_request(encrypted_uid, region, token)
             if after is None:
